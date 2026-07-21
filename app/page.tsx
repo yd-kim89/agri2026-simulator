@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { T } from "@/lib/tokens";
 import {
   ITEMS,
@@ -9,6 +9,7 @@ import {
   MONTH_SAVING,
   topFalls,
   topRises,
+  findItem,
   type Verdict,
 } from "@/lib/data";
 import { simulate, type SimResult } from "@/lib/simulate";
@@ -558,13 +559,40 @@ function Sim(props: {
   );
 }
 
-/* ══════════ S-002 이력·사후 검증 ══════════ */
+/* ══════════ S-002 이력·사후 검증 (Supabase 라이브 연동) ══════════ */
+interface DisplayRow {
+  key: string;
+  date: string;
+  title: string;
+  scenario: string;
+  compare: string;
+  verdict: Verdict;
+  detail: string;
+  source: "라이브" | "데모";
+}
+
+const SCENARIO_KO: Record<string, string> = {
+  buy_today: "① 오늘 즉시 매입",
+  wait_7d: "② 7일 대기",
+  pre_purchase_event: "③ 이벤트 선매입",
+};
+
 function Hist(props: {
   filter: "전체" | Verdict;
   setFilter: (v: "전체" | Verdict) => void;
   open: number;
   setOpen: (i: number) => void;
 }) {
+  const [live, setLive] = useState<{ enabled: boolean; count: number; rows: LiveRow[] } | null>(null);
+  const [err, setErr] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/history")
+      .then((r) => r.json())
+      .then(setLive)
+      .catch(() => setErr(true));
+  }, []);
+
   const badge = (v: Verdict): React.CSSProperties => {
     const c =
       v === "적중" ? [T.signalDownBg, T.signalDown]
@@ -573,15 +601,59 @@ function Hist(props: {
       : [T.parchment, T.inkFaint];
     return { flexShrink: 0, fontSize: 12, fontWeight: 600, borderRadius: T.rPill, padding: "4px 12px", background: c[0], color: c[1] };
   };
-  const filtered = HIST.filter((h) => props.filter === "전체" || h.verdict === props.filter);
+
+  // 라이브(Supabase) 기록 매핑 — 검증 파이프라인 전이므로 전부 "검증 대기중"
+  const liveRows: DisplayRow[] = (live?.rows || []).map((r) => {
+    const it = findItem(r.item_name);
+    const unit = it ? unitShort(it.unit) : "";
+    const d = r.created_at ? r.created_at.slice(5, 10).replace("-", "-") : "--";
+    const scList = Array.isArray(r.scenarios) ? (r.scenarios as LiveScenario[]) : [];
+    const bestSc = scList.find((s) => s.scenario === r.best_scenario);
+    const detail = bestSc
+      ? `${bestSc.recommendation} — ${bestSc.description} (신뢰도 ${bestSc.confidence_grade}/5)`
+      : "시뮬레이션 로그. 매입 예정일 도래 후 실측과 자동 대조합니다.";
+    return {
+      key: "live-" + r.id,
+      date: d,
+      title: `${r.item_name} ${Number(r.quantity)}${unit}`,
+      scenario: SCENARIO_KO[r.best_scenario] || r.best_scenario,
+      compare: r.target_date ? `매입 예정일 ${r.target_date} 이후 실측 대조` : "실측 대조 예정",
+      verdict: "검증 대기중",
+      detail,
+      source: "라이브",
+    };
+  });
+
+  const demoRows: DisplayRow[] = HIST.map((h, i) => ({
+    key: "demo-" + i,
+    date: h.date,
+    title: h.title,
+    scenario: h.scenario,
+    compare: h.compare,
+    verdict: h.verdict,
+    detail: h.detail,
+    source: "데모",
+  }));
+
+  const all = [...liveRows, ...demoRows];
+  const filtered = all.filter((h) => props.filter === "전체" || h.verdict === props.filter);
+  const liveCount = live?.count ?? 0;
+  const connected = !!live?.enabled;
+
   return (
     <div style={{ flex: 1 }}>
       <section style={{ background: T.canvas }}>
         <div style={{ maxWidth: 1024, margin: "0 auto", padding: "64px 22px 48px" }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: T.inkMuted, letterSpacing: "0.2px" }}>이번 달 누적 절감액</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+            <span style={{ width: 8, height: 8, borderRadius: T.rPill, background: connected ? T.signalDown : "#6e6e73", display: "inline-block" }} />
+            <span style={{ fontSize: 14, fontWeight: 600, color: T.inkMuted, letterSpacing: "0.2px" }}>
+              {connected ? `Supabase 연동 · 라이브 기록 ${liveCount}건` : err ? "기록 조회 실패 — 데모 표시" : "라이브 기록 불러오는 중…"}
+            </span>
+          </div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: T.inkMuted, letterSpacing: "0.2px" }}>이번 달 누적 절감액 <span style={{ color: T.inkFaint, fontWeight: 400 }}>· 검증 완료 샘플(데모)</span></div>
           <div style={{ fontSize: "clamp(40px,8vw,56px)", fontWeight: 600, lineHeight: 1.07, letterSpacing: "-0.28px", marginTop: 8 }}>{fmt(MONTH_SAVING)}</div>
-          <p style={{ fontSize: 17, lineHeight: 1.47, letterSpacing: "-0.374px", color: T.inkMuted, margin: "12px 0 0", maxWidth: 560 }}>
-            시뮬레이션 시점 최유리가 대비 실제 매입 시점가 차이의 누적. 이 도구가 맞았는지, 장부로 확인하세요.
+          <p style={{ fontSize: 17, lineHeight: 1.47, letterSpacing: "-0.374px", color: T.inkMuted, margin: "12px 0 0", maxWidth: 620 }}>
+            절감액은 검증 완료된 <b>데모 샘플</b> 기준입니다. 아래 목록의 <b>라이브</b> 기록은 방금 실행한 시뮬레이션이 Supabase에 저장된 것으로, 매입 예정일 도래 후 실측과 대조되어 판정됩니다.
           </p>
         </div>
       </section>
@@ -599,12 +671,13 @@ function Hist(props: {
               <div style={{ padding: "56px 24px", textAlign: "center", fontSize: 17, color: T.inkFaint }}>해당 판정의 기록이 없습니다</div>
             ) : (
               filtered.map((h, i) => (
-                <div key={h.date + h.title}>
+                <div key={h.key}>
                   <button onClick={() => props.setOpen(props.open === i ? -1 : i)} style={{ width: "100%", background: "none", border: "none", borderTop: `1px solid ${T.dividerSoft}`, padding: "18px 24px", display: "flex", alignItems: "center", gap: 16, cursor: "pointer", fontFamily: "inherit", textAlign: "left", flexWrap: "wrap" }}>
                     <span style={{ fontSize: 14, color: T.inkMuted, width: 52, flexShrink: 0 }}>{h.date}</span>
                     <span style={{ fontSize: 17, fontWeight: 600, letterSpacing: "-0.374px", width: 130, flexShrink: 0 }}>{h.title}</span>
                     <span style={{ fontSize: 14, color: T.inkMuted, flex: 1, minWidth: 120 }}>{h.scenario}</span>
                     <span style={{ fontSize: 15, color: T.ink }}>{h.compare}</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: h.source === "라이브" ? T.primary : T.inkFaint, border: `1px solid ${h.source === "라이브" ? T.primary : "rgba(0,0,0,0.14)"}`, borderRadius: T.rPill, padding: "2px 8px", flexShrink: 0 }}>{h.source}</span>
                     <span style={badge(h.verdict)}>{h.verdict}</span>
                   </button>
                   {props.open === i && (
@@ -617,12 +690,28 @@ function Hist(props: {
             )}
           </div>
           <div style={{ fontSize: 12, color: T.inkFaint, marginTop: 16 }}>
-            적중 = 오차 ≤3% · 근접 = ≤8% · 빗나감 = &gt;8% — 실측 대조 미수집 품목은 "검증 대기중"으로 구분 표시합니다(오류 아님).
+            적중 = 오차 ≤3% · 근접 = ≤8% · 빗나감 = &gt;8% — 실측 대조 미수집 품목은 "검증 대기중"으로 구분 표시합니다(오류 아님). <b>라이브</b>=Supabase 실제 기록 · <b>데모</b>=검증 화면 미리보기.
           </div>
         </div>
       </section>
     </div>
   );
+}
+
+interface LiveScenario {
+  scenario: string;
+  recommendation: string;
+  description: string;
+  confidence_grade: number;
+}
+interface LiveRow {
+  id: string;
+  item_name: string;
+  quantity: number;
+  best_scenario: string;
+  scenarios: unknown;
+  target_date: string | null;
+  created_at: string;
 }
 
 /* ══════════ S-003 농가 직거래 비교 ══════════ */

@@ -22,6 +22,41 @@ export interface SimLogPayload {
   user_id: string;
 }
 
+export interface HistoryRow {
+  id: string;
+  item_name: string;
+  quantity: number;
+  best_scenario: string;
+  scenarios: unknown;
+  target_date: string | null;
+  created_at: string;
+}
+
+/** 최근 시뮬레이션 기록 조회 (라이브). env 없으면 빈 결과. */
+export async function getHistory(): Promise<{
+  rows: HistoryRow[];
+  count: number;
+}> {
+  if (!client) return { rows: [], count: 0 };
+  try {
+    const [list, cnt] = await Promise.all([
+      client
+        .from("simulation_log")
+        .select("id,item_name,quantity,best_scenario,scenarios,target_date,created_at")
+        .order("created_at", { ascending: false })
+        .limit(20),
+      client.from("simulation_log").select("id", { count: "exact", head: true }),
+    ]);
+    if (list.error) return { rows: [], count: 0 };
+    return {
+      rows: (list.data as HistoryRow[]) || [],
+      count: cnt.count ?? (list.data?.length || 0),
+    };
+  } catch {
+    return { rows: [], count: 0 };
+  }
+}
+
 /** 시뮬레이션 실행 로그 저장. 실패해도 예외를 던지지 않음(도구 신뢰 우선). */
 export async function logSimulation(
   payload: SimLogPayload,

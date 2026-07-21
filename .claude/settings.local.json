@@ -4,7 +4,11 @@
       "Bash(gh auth *)",
       "Bash(command -v gh)",
       "Bash(npm install *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(git add *)",
+      "Bash(git -c user.name=김영도 -c user.email=dudmen@naver.com commit -q -m ' *)",
+      "Bash(git push *)",
+      "Bash(npx --yes vercel --prod --yes)"
     ]
   }
 }
