@@ -3,6 +3,8 @@
 > 발주 전에 미리 돌려보는 **3-시나리오 농산물 매입 의사결정 도구** — AgriY&D
 > "농산물을 언제·누구에게 사야 유리한지, 감이 아니라 숫자로." 사람과 AI가 동시에 호출한다.
 
+**🔗 라이브:** https://overedge-phi.vercel.app · **API:** `POST /api/simulate`
+
 PRD v3(`docs/` 참조) P0 기능을 Next.js로 구현. Apple 디자인 언어 채용, LLM-friendly API, 정직성 라벨 내장.
 
 ## 화면 (S-000 ~ S-003)
