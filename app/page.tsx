@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import { T } from "@/lib/tokens";
 import {
   ITEMS,
@@ -12,9 +13,15 @@ import {
   findItem,
   type Verdict,
 } from "@/lib/data";
-import { simulate, type SimResult } from "@/lib/simulate";
+import { simulate, toLlmSchema, type SimResult } from "@/lib/simulate";
+import {
+  getBrowserSupabase,
+  logMySimulation,
+  getMyHistory,
+  sendMagicLink,
+} from "@/lib/supabaseBrowser";
 
-type Tab = "board" | "sim" | "hist" | "trade";
+type Tab = "board" | "sim" | "hist" | "trade" | "account";
 
 const fmt = (n: number) => "₩" + Math.round(n).toLocaleString("ko-KR");
 const unitShort = (u: string) => (u.indexOf("상자") === 0 ? "상자" : "kg");
@@ -36,6 +43,16 @@ export default function Page() {
   // 직거래
   const [tradeIdx, setTradeIdx] = useState(0);
   const [quoteSent, setQuoteSent] = useState(false);
+  // 계정 (S-004 매직링크 — Phase 5)
+  const [session, setSession] = useState<Session | null>(null);
+
+  useEffect(() => {
+    const sb = getBrowserSupabase();
+    if (!sb) return;
+    sb.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: sub } = sb.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
 
   const selItem = ITEMS[selIdx];
 
@@ -59,18 +76,36 @@ export default function Page() {
       });
       setResult(r);
       setLoading(false);
-      // 이력 저장(API 경유, env 없으면 no-op) — fire-and-forget
-      fetch("/api/simulate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          item: ITEMS[useIdx].code,
-          quantity: parseFloat(useQty) || 1,
-          target_date: targetDate,
-          sale_price: sale || null,
-          api_down: apiDown,
-        }),
-      }).catch(() => {});
+      // 이력 저장 — fire-and-forget (env 없으면 no-op)
+      if (session) {
+        // 로그인: 계정 귀속 저장 (owner = auth.uid(), RLS 본인 행만 — 멀티세션)
+        const llm = toLlmSchema(r);
+        logMySimulation(
+          {
+            item_code: r.itemCode,
+            item_name: r.item,
+            quantity: r.quantity,
+            target_date: r.targetDate,
+            best_scenario: llm.best_scenario,
+            scenarios: llm.scenarios,
+            user_id: session.user.email || "member",
+          },
+          session.user.id,
+        ).catch(() => {});
+      } else {
+        // 비로그인: 기존 익명 로그(API 경유) — 하위 호환
+        fetch("/api/simulate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            item: ITEMS[useIdx].code,
+            quantity: parseFloat(useQty) || 1,
+            target_date: targetDate,
+            sale_price: sale || null,
+            api_down: apiDown,
+          }),
+        }).catch(() => {});
+      }
     }, 650);
   }
 
@@ -175,6 +210,29 @@ export default function Page() {
                 {label}
               </button>
             ))}
+            {/* 계정 (S-004) — 크롬 최소: text-link 하나 */}
+            <button
+              onClick={() => setTab("account")}
+              title={session ? session.user.email || "" : "매직링크 로그인"}
+              style={{
+                background: "none",
+                border: "none",
+                padding: "4px 0",
+                fontFamily: "inherit",
+                cursor: "pointer",
+                fontSize: 14,
+                letterSpacing: "-0.2px",
+                color: tab === "account" ? T.ink : T.primary,
+                fontWeight: tab === "account" ? 600 : 400,
+                borderBottom: `2px solid ${tab === "account" ? T.ink : "transparent"}`,
+                maxWidth: 140,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {session ? (session.user.email || "내 계정").split("@")[0] + " ●" : "로그인"}
+            </button>
             <button
               onClick={() => setTab("sim")}
               style={{
@@ -231,8 +289,9 @@ export default function Page() {
         />
       )}
       {tab === "hist" && (
-        <Hist filter={histFilter} setFilter={setHistFilter} open={histOpen} setOpen={setHistOpen} />
+        <Hist filter={histFilter} setFilter={setHistFilter} open={histOpen} setOpen={setHistOpen} session={session} goLogin={() => setTab("account")} />
       )}
+      {tab === "account" && <Account session={session} goHist={() => setTab("hist")} />}
       {tab === "trade" && (
         <Trade idx={tradeIdx} setIdx={(i) => { setTradeIdx(i); setQuoteSent(false); }} sale={sale} quoteSent={quoteSent} sendQuote={() => setQuoteSent(true)} />
       )}
@@ -582,16 +641,27 @@ function Hist(props: {
   setFilter: (v: "전체" | Verdict) => void;
   open: number;
   setOpen: (i: number) => void;
+  session: Session | null;
+  goLogin: () => void;
 }) {
   const [live, setLive] = useState<{ enabled: boolean; count: number; rows: LiveRow[] } | null>(null);
   const [err, setErr] = useState(false);
+  const mine = !!props.session;
 
   useEffect(() => {
-    fetch("/api/history")
-      .then((r) => r.json())
-      .then(setLive)
-      .catch(() => setErr(true));
-  }, []);
+    if (props.session) {
+      // 로그인: 내 계정 기록만 (RLS — 멀티세션, 어느 기기든 동일)
+      getMyHistory()
+        .then(({ rows, count }) => setLive({ enabled: true, count, rows: rows as unknown as LiveRow[] }))
+        .catch(() => setErr(true));
+    } else {
+      // 비로그인: 익명 공용 피드 (owner is null 행만 — 하위 호환)
+      fetch("/api/history")
+        .then((r) => r.json())
+        .then(setLive)
+        .catch(() => setErr(true));
+    }
+  }, [props.session]);
 
   const badge = (v: Verdict): React.CSSProperties => {
     const c =
@@ -647,8 +717,17 @@ function Hist(props: {
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
             <span style={{ width: 8, height: 8, borderRadius: T.rPill, background: connected ? T.signalDown : "#6e6e73", display: "inline-block" }} />
             <span style={{ fontSize: 14, fontWeight: 600, color: T.inkMuted, letterSpacing: "0.2px" }}>
-              {connected ? `Supabase 연동 · 라이브 기록 ${liveCount}건` : err ? "기록 조회 실패 — 데모 표시" : "라이브 기록 불러오는 중…"}
+              {connected
+                ? mine
+                  ? `내 계정 기록 ${liveCount}건 · ${props.session?.user.email || ""}`
+                  : `Supabase 연동 · 라이브 기록 ${liveCount}건`
+                : err ? "기록 조회 실패 — 데모 표시" : "라이브 기록 불러오는 중…"}
             </span>
+            {!mine && (
+              <button onClick={props.goLogin} style={{ background: "none", border: "none", padding: 0, fontSize: 14, color: T.primary, cursor: "pointer", fontFamily: "inherit" }}>
+                로그인하면 기록이 계정에 저장됩니다 ›
+              </button>
+            )}
           </div>
           <div style={{ fontSize: 14, fontWeight: 600, color: T.inkMuted, letterSpacing: "0.2px" }}>이번 달 누적 절감액 <span style={{ color: T.inkFaint, fontWeight: 400 }}>· 검증 완료 샘플(데모)</span></div>
           <div style={{ fontSize: "clamp(40px,8vw,56px)", fontWeight: 600, lineHeight: 1.07, letterSpacing: "-0.28px", marginTop: 8 }}>{fmt(MONTH_SAVING)}</div>
@@ -712,6 +791,150 @@ interface LiveRow {
   scenarios: unknown;
   target_date: string | null;
   created_at: string;
+}
+
+/* ══════════ S-004 계정 · 매직링크 로그인 (Phase 5) ══════════ */
+function Account({ session, goHist }: { session: Session | null; goHist: () => void }) {
+  const [email, setEmail] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+  const [resendIn, setResendIn] = useState(0);
+  const enabled = !!getBrowserSupabase();
+
+  // 재발송 타이머 (60초 — PRD S-004)
+  useEffect(() => {
+    if (resendIn <= 0) return;
+    const t = window.setTimeout(() => setResendIn(resendIn - 1), 1000);
+    return () => window.clearTimeout(t);
+  }, [resendIn]);
+
+  async function send() {
+    const e = email.trim();
+    if (!e || !e.includes("@")) {
+      setError("이메일 형식을 확인해 주세요");
+      return;
+    }
+    setSending(true);
+    setError("");
+    const res = await sendMagicLink(e);
+    setSending(false);
+    if (res.ok) {
+      setSent(true);
+      setResendIn(60);
+    } else {
+      // 에러 원문 그대로 노출 — 뭉뚱그린 메시지 금지 (PRD 08절)
+      setError(res.reason || "알 수 없는 오류");
+    }
+  }
+
+  const card: React.CSSProperties = {
+    background: T.canvas,
+    border: `1px solid ${T.hairline}`,
+    borderRadius: T.rLg,
+    padding: 32,
+    maxWidth: 440,
+    margin: "0 auto",
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  };
+
+  return (
+    <div style={{ flex: 1 }}>
+      <section style={{ background: T.canvas }}>
+        <div style={{ maxWidth: 1024, margin: "0 auto", padding: "64px 22px 40px", textAlign: "center" }}>
+          <h1 style={{ fontSize: "clamp(34px,7vw,56px)", fontWeight: 600, lineHeight: 1.07, letterSpacing: "-0.28px", margin: 0 }}>
+            {session ? "내 계정." : "비밀번호 없이."}
+          </h1>
+          <p style={{ fontSize: 28, fontWeight: 400, lineHeight: 1.14, letterSpacing: "0.196px", color: T.inkMuted, margin: "16px 0 0" }}>
+            {session ? "기록은 이 계정에 저장됩니다 — 어느 기기에서든." : "이메일로 받은 링크 1클릭이면 로그인됩니다."}
+          </p>
+        </div>
+      </section>
+      <section style={{ background: T.parchment, minHeight: 320 }}>
+        <div style={{ maxWidth: 1024, margin: "0 auto", padding: "48px 22px 80px" }}>
+          {session ? (
+            <div style={card}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: T.signalDown }}>● 로그인됨</div>
+              <div style={{ fontSize: 21, fontWeight: 600, letterSpacing: "0.231px", wordBreak: "break-all" }}>
+                {session.user.email}
+              </div>
+              <div style={{ fontSize: 17, lineHeight: 1.47, letterSpacing: "-0.374px", color: T.inkMuted }}>
+                시뮬레이션을 실행하면 이 계정의 이력으로 저장됩니다. 다른 기기에서 같은 이메일로 로그인하면 같은 기록을 봅니다.
+              </div>
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <button onClick={goHist} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: T.rPill, padding: "12px 28px", fontSize: 17, cursor: "pointer", fontFamily: "inherit" }}>
+                  내 이력 보기 ›
+                </button>
+                <button
+                  onClick={() => getBrowserSupabase()?.auth.signOut()}
+                  style={{ background: T.canvas, color: T.ink, border: "1px solid rgba(0,0,0,0.12)", borderRadius: T.rPill, padding: "12px 28px", fontSize: 17, cursor: "pointer", fontFamily: "inherit" }}
+                >
+                  로그아웃
+                </button>
+              </div>
+              <div style={{ fontSize: 12, color: T.inkFaint }}>
+                수집 정보는 이메일뿐입니다. 계정 삭제(기록 파기)는 문의로 처리합니다 — RLS로 본인 외에는 기록을 볼 수 없습니다.
+              </div>
+            </div>
+          ) : !enabled ? (
+            <div style={card}>
+              <div style={{ fontSize: 14, fontWeight: 600, background: "#6e6e73", color: "#fff", borderRadius: T.rPill, padding: "3px 12px", alignSelf: "flex-start" }}>
+                로그인 비활성
+              </div>
+              <div style={{ fontSize: 17, lineHeight: 1.47, color: T.inkMuted }}>
+                Supabase 미연결 상태입니다. 시뮬레이터는 정상 동작하며, 로그인·계정 이력만 비활성입니다 (graceful degradation).
+              </div>
+            </div>
+          ) : sent ? (
+            <div style={card}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: T.signalDown }}>● 링크 발송됨</div>
+              <div style={{ fontSize: 21, fontWeight: 600, letterSpacing: "0.231px" }}>메일함을 확인해 주세요</div>
+              <div style={{ fontSize: 17, lineHeight: 1.47, letterSpacing: "-0.374px", color: T.inkMuted }}>
+                <b>{email.trim()}</b>(으)로 로그인 링크를 보냈습니다. 메일의 링크를 누르면 이 화면으로 돌아옵니다. 안 보이면 스팸함도 확인해 주세요.
+              </div>
+              {error && <div style={{ fontSize: 14, color: T.signalUp }}>{error}</div>}
+              <button
+                onClick={send}
+                disabled={resendIn > 0 || sending}
+                style={{ alignSelf: "flex-start", background: resendIn > 0 ? T.parchment : T.primary, color: resendIn > 0 ? T.inkFaint : "#fff", border: "none", borderRadius: T.rPill, padding: "10px 24px", fontSize: 15, cursor: resendIn > 0 ? "default" : "pointer", fontFamily: "inherit" }}
+              >
+                {resendIn > 0 ? `재발송 가능까지 ${resendIn}초` : sending ? "발송 중…" : "링크 재발송"}
+              </button>
+            </div>
+          ) : (
+            <div style={card}>
+              <div style={{ fontSize: 21, fontWeight: 600, letterSpacing: "0.231px" }}>매직링크 로그인</div>
+              <div style={{ display: "flex", alignItems: "center", background: T.canvas, border: "1px solid rgba(0,0,0,0.12)", borderRadius: T.rPill, height: 44, padding: "0 20px", gap: 8 }}>
+                <span style={{ fontSize: 14, color: T.inkMuted, flexShrink: 0 }}>이메일</span>
+                <input
+                  value={email}
+                  onChange={(e) => { setEmail(e.target.value); setError(""); }}
+                  onKeyDown={(e) => e.key === "Enter" && !sending && send()}
+                  placeholder="you@example.com"
+                  type="email"
+                  autoComplete="email"
+                  style={{ border: "none", outline: "none", flex: 1, minWidth: 0, fontSize: 17, background: "transparent" }}
+                />
+              </div>
+              {error && <div style={{ fontSize: 14, color: T.signalUp }}>{error}</div>}
+              <button
+                onClick={send}
+                disabled={sending}
+                style={{ background: T.primary, color: "#fff", border: "none", borderRadius: T.rPill, padding: "12px 28px", fontSize: 18, fontWeight: 300, cursor: "pointer", fontFamily: "inherit", alignSelf: "flex-start" }}
+              >
+                {sending ? "발송 중…" : "매직링크 받기"}
+              </button>
+              <div style={{ fontSize: 12, color: T.inkFaint, lineHeight: 1.5 }}>
+                비밀번호를 만들지 않습니다. 수집 정보는 이메일뿐이며, 시뮬레이션 기록은 본인만 볼 수 있습니다(RLS). 로그인 없이도 시뮬레이터는 그대로 사용할 수 있습니다 — 기록만 저장되지 않습니다.
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
 }
 
 /* ══════════ S-003 농가 직거래 비교 ══════════ */
