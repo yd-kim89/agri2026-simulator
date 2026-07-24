@@ -7,6 +7,7 @@ import { defineConfig, devices } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "./tests/e2e",
+  testIgnore: /staging-.*\.spec\.ts/, // mutation 테스트는 스테이징 전용 config로만 실행(prod 오염 방지)
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: 0,
