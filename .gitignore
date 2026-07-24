@@ -8,3 +8,10 @@ coverage
 *.log
 .DS_Store
 next-env.d.ts
+# Playwright 실행 산출물(리포트 원문·영상·트레이스는 무거워 커밋 제외, 리포트 md는 유지)
+docs/test/test-results
+docs/test/playwright-report
+docs/test/results.json
+test-results
+playwright-report
+.playwright

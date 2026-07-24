@@ -1,6 +1,6 @@
 {
   "name": "agri2026-simulator",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "private": true,
   "description": "agri2026 매입 시뮬레이터 — 발주 전에 미리 돌려보는 3-시나리오 의사결정 도구 (AgriY&D)",
   "scripts": {
@@ -9,7 +9,10 @@
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
-    "test:cov": "vitest run --coverage"
+    "test:cov": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
@@ -18,6 +21,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/node": "^22.10.7",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",
