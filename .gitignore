@@ -15,3 +15,6 @@ docs/test/results.json
 test-results
 playwright-report
 .playwright
+docs/test/staging-report
+docs/test/staging-artifacts
+docs/test/staging-results.json
